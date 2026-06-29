@@ -1,0 +1,29 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# WASM output
+*.wasm
+
+# Test binaries
+*.test
+
+# Go build cache / vendor
+vendor/
+
+# Output binaries (examples)
+example/*/web/main.wasm
+example/*/web/wasm_exec.js
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
