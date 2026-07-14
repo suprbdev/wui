@@ -30,10 +30,23 @@ type wasmRenderer struct {
 	root     js.Value
 	dispatch func(Msg)
 	funcs    []js.Func
+
+	// prevValues snapshots live <input> values at the start of each
+	// render; lastSpec records the spec Value each input was last
+	// rendered with. Together they let renderTextInput distinguish
+	// programmatic value changes (respect the new spec) from
+	// in-progress typing (preserve the live value) — mirroring the
+	// TUI renderer's ensureInput.
+	prevValues map[string]string
+	lastSpec   map[string]string
 }
 
 func newWASMRenderer(root js.Value, dispatch func(Msg)) *wasmRenderer {
-	return &wasmRenderer{root: root, dispatch: dispatch}
+	return &wasmRenderer{
+		root:     root,
+		dispatch: dispatch,
+		lastSpec: make(map[string]string),
+	}
 }
 
 func (r *wasmRenderer) Render(el Element) {
@@ -43,7 +56,7 @@ func (r *wasmRenderer) Render(el Element) {
 	if active := doc.Get("activeElement"); !active.IsNull() && !active.IsUndefined() {
 		activeID = active.Get("id").String()
 	}
-	inputValues := r.collectInputValues(doc)
+	r.prevValues = r.collectInputValues(doc)
 
 	for _, f := range r.funcs {
 		f.Release()
@@ -54,13 +67,6 @@ func (r *wasmRenderer) Render(el Element) {
 	node := r.renderEl(el, doc)
 	r.root.Call("appendChild", node)
 
-	for id, val := range inputValues {
-		if el := doc.Call("getElementById", id); !el.IsNull() {
-			if el.Get("value").String() != val {
-				el.Set("value", val)
-			}
-		}
-	}
 	if activeID != "" {
 		if el := doc.Call("getElementById", activeID); !el.IsNull() {
 			el.Call("focus")
@@ -125,7 +131,15 @@ func (r *wasmRenderer) renderBox(e BoxEl, doc js.Value) js.Value {
 	if e.Direction == Column {
 		dir = "column"
 	}
-	css := fmt.Sprintf("display:flex;flex-direction:%s;gap:%dpx;", dir, e.Gap)
+	css := "display:flex;flex-direction:" + dir + ";"
+	if e.Gap > 0 {
+		// Gap is terminal cells in the TUI; ch/lh (with an em
+		// fallback) are the closest CSS analogues.
+		css += fmt.Sprintf("column-gap:%dch;row-gap:%dem;row-gap:%dlh;", e.Gap, e.Gap, e.Gap)
+	}
+	if a := alignItemsCSS(e.Align); a != "" {
+		css += "align-items:" + a + ";"
+	}
 	n.Set("style", css+styleToCSS(e.Style))
 	for _, c := range e.Children {
 		n.Call("appendChild", r.renderEl(c, doc))
@@ -160,7 +174,14 @@ func (r *wasmRenderer) renderTextInput(e TextInputEl, doc js.Value) js.Value {
 	} else {
 		n.Set("type", "text")
 	}
-	n.Set("value", e.Value)
+	// Keep in-progress typing across the full-tree replace unless the
+	// app changed the spec value programmatically since last render.
+	val := e.Value
+	if prev, ok := r.prevValues[e.ID]; ok && r.lastSpec[e.ID] == e.Value {
+		val = prev
+	}
+	r.lastSpec[e.ID] = e.Value
+	n.Set("value", val)
 	n.Set("placeholder", e.Placeholder)
 	if e.Disabled {
 		n.Set("disabled", true)
@@ -181,6 +202,10 @@ func (r *wasmRenderer) renderTextInput(e TextInputEl, doc js.Value) js.Value {
 		onSubmit := e.OnSubmit
 		keydownFn := js.FuncOf(func(this js.Value, args []js.Value) any {
 			if args[0].Get("key").String() == "Enter" {
+				// Stop the enclosing form (if any) from also
+				// submitting — the input's own handler wins,
+				// matching TUI dispatch order.
+				args[0].Call("preventDefault")
 				val := args[0].Get("target").Get("value").String()
 				r.dispatch(onSubmit(val))
 			}
@@ -314,16 +339,26 @@ func styleToCSS(s Style) string {
 	if s.Underline {
 		parts = append(parts, "text-decoration:underline")
 	}
+	// Sizing units mirror terminal cells: ch horizontally, lh (line
+	// height) vertically with an em fallback for older browsers.
 	if s.Width > 0 {
-		parts = append(parts, fmt.Sprintf("width:%dpx", s.Width))
+		parts = append(parts, fmt.Sprintf("width:%dch", s.Width))
 	}
 	if s.Height > 0 {
-		parts = append(parts, fmt.Sprintf("height:%dpx", s.Height))
+		parts = append(parts, fmt.Sprintf("height:%dem;height:%dlh", s.Height, s.Height))
 	}
-	parts = append(parts, fmt.Sprintf("padding:%dpx %dpx %dpx %dpx",
-		s.Padding[0], s.Padding[1], s.Padding[2], s.Padding[3]))
-	parts = append(parts, fmt.Sprintf("margin:%dpx %dpx %dpx %dpx",
-		s.Margin[0], s.Margin[1], s.Margin[2], s.Margin[3]))
+	if s.Padding != [4]int{} {
+		parts = append(parts, fmt.Sprintf("padding:%dem %dch %dem %dch",
+			s.Padding[0], s.Padding[1], s.Padding[2], s.Padding[3]))
+		parts = append(parts, fmt.Sprintf("padding:%dlh %dch %dlh %dch",
+			s.Padding[0], s.Padding[1], s.Padding[2], s.Padding[3]))
+	}
+	if s.Margin != [4]int{} {
+		parts = append(parts, fmt.Sprintf("margin:%dem %dch %dem %dch",
+			s.Margin[0], s.Margin[1], s.Margin[2], s.Margin[3]))
+		parts = append(parts, fmt.Sprintf("margin:%dlh %dch %dlh %dch",
+			s.Margin[0], s.Margin[1], s.Margin[2], s.Margin[3]))
+	}
 	if s.Border {
 		col := "currentColor"
 		if s.BorderColor != "" {
@@ -342,4 +377,91 @@ func resolveCSSColor(c Color) string {
 		return ansiPalette[idx]
 	}
 	return string(c)
+}
+
+// alignItemsCSS maps Align to a CSS align-items value. AlignStart
+// returns "" since flex-start is the default.
+func alignItemsCSS(a Align) string {
+	switch a {
+	case AlignCenter:
+		return "center"
+	case AlignEnd:
+		return "flex-end"
+	case AlignStretch:
+		return "stretch"
+	default:
+		return ""
+	}
+}
+
+// baseCSS is the default stylesheet injected by WASM builds (disable
+// with WithoutBaseCSS). It styles the semantic HTML output to visually
+// match the TUI renderer: monospace type on a dark background, buttons
+// drawn as "[ Label ]" that reverse-video on focus, unordered lists
+// with "- " markers, and bordered tables.
+const baseCSS = `
+:root { color-scheme: dark; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: #14151a;
+  color: #e6e6e6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.4;
+}
+#wui-root { padding: 1em 1ch; }
+#wui-root button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  width: fit-content;
+}
+#wui-root button::before { content: "[ "; }
+#wui-root button::after { content: " ]"; }
+#wui-root button:hover:not(:disabled),
+#wui-root button:focus-visible {
+  background: #e6e6e6;
+  color: #14151a;
+  outline: none;
+}
+#wui-root button:disabled { opacity: 0.45; cursor: default; }
+#wui-root input {
+  font: inherit;
+  color: inherit;
+  background: #1f2128;
+  border: 1px solid #3a3d46;
+  border-radius: 3px;
+  padding: 0 1ch;
+}
+#wui-root input:focus { outline: none; border-color: #7aa2f7; }
+#wui-root a { color: inherit; }
+#wui-root a:focus-visible {
+  background: #e6e6e6;
+  color: #14151a;
+  outline: none;
+}
+#wui-root ul { list-style: none; margin: 0; padding: 0; }
+#wui-root ul > li::before { content: "- "; }
+#wui-root ol { margin: 0; padding: 0; list-style-position: inside; }
+#wui-root table { border-collapse: collapse; }
+#wui-root th, #wui-root td {
+  border: 1px solid #3a3d46;
+  padding: 0 1ch;
+  text-align: left;
+}
+`
+
+// injectBaseCSS appends the default stylesheet to <head>, once.
+func injectBaseCSS(doc js.Value) {
+	if existing := doc.Call("getElementById", "wui-base-css"); !existing.IsNull() {
+		return
+	}
+	style := doc.Call("createElement", "style")
+	style.Set("id", "wui-base-css")
+	style.Set("textContent", baseCSS)
+	doc.Get("head").Call("appendChild", style)
 }

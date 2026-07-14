@@ -3,28 +3,61 @@
 package wui
 
 import (
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type platformState struct {
 	teaProgram *tea.Program
+	adapter    *teaAdapter
 }
 
-func newProgram(m Model) *Program {
+func newProgram(m Model, cfg config) *Program {
 	adapter := &teaAdapter{
 		model:    m,
 		renderer: newTUIRenderer(80, 24),
 		focus:    newTUIFocusManager(),
 	}
 	return &Program{
-		model:         m,
-		platformState: platformState{teaProgram: tea.NewProgram(adapter, tea.WithAltScreen())},
+		model: m,
+		cfg:   cfg,
+		platformState: platformState{
+			adapter:    adapter,
+			teaProgram: tea.NewProgram(adapter, tea.WithAltScreen()),
+		},
 	}
 }
 
 func (p *Program) run() error {
-	_, err := p.platformState.teaProgram.Run()
+	if p.cfg.serveAddr != "" {
+		ln, err := net.Listen("tcp", p.cfg.serveAddr)
+		if err != nil {
+			return fmt.Errorf("wui: web server: %w", err)
+		}
+		defer ln.Close()
+		go http.Serve(ln, http.FileServer(http.Dir(p.cfg.webDir)))
+		p.adapter.serveURL = serveURL(ln.Addr())
+	}
+	_, err := p.teaProgram.Run()
 	return err
+}
+
+// serveURL derives a browser-openable URL from the bound listener
+// address, mapping wildcard and loopback hosts to "localhost".
+func serveURL(addr net.Addr) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "http://" + addr.String() + "/"
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
 // teaAdapter bridges a wui.Model into a tea.Model.
@@ -32,6 +65,7 @@ type teaAdapter struct {
 	model    Model
 	renderer *tuiRenderer
 	focus    *tuiFocusManager
+	serveURL string // non-empty when WithWebServer is active
 }
 
 func (a *teaAdapter) Init() tea.Cmd {
@@ -97,7 +131,9 @@ func (a *teaAdapter) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // routeKeyToFocused dispatches a key event to whichever element holds
 // focus: text inputs get the key forwarded to their bubbles model;
-// buttons and links activate on Enter via their Activate closure.
+// buttons and links activate on Enter via their Activate closure;
+// elements inside a Form fall back to submitting the form on Enter,
+// matching native browser behaviour in the HTML renderer.
 func (a *teaAdapter) routeKeyToFocused(focusedID string, focusables []focusable, m tea.KeyMsg) (Model, tea.Cmd, bool) {
 	var target *focusable
 	for i := range focusables {
@@ -111,9 +147,15 @@ func (a *teaAdapter) routeKeyToFocused(focusedID string, focusables []focusable,
 	}
 
 	if !target.IsInput {
-		if m.String() == "enter" && target.Activate != nil {
-			newModel, cmd := a.model.Update(target.Activate())
-			return newModel, wuiCmdToTea(cmd), true
+		if m.String() == "enter" {
+			if target.Activate != nil {
+				newModel, cmd := a.model.Update(target.Activate())
+				return newModel, wuiCmdToTea(cmd), true
+			}
+			if msg := a.submitForm(target.Form); msg != nil {
+				newModel, cmd := a.model.Update(msg)
+				return newModel, wuiCmdToTea(cmd), true
+			}
 		}
 		return a.model, nil, true
 	}
@@ -130,8 +172,12 @@ func (a *teaAdapter) routeKeyToFocused(focusedID string, focusables []focusable,
 
 	if m.String() == "enter" {
 		if el.OnSubmit != nil {
-			newModel, _ := a.model.Update(SubmitMsg{FormValues: map[string]string{focusedID: updated.Value()}})
-			return newModel, nil, true
+			newModel, cmd := a.model.Update(el.OnSubmit(updated.Value()))
+			return newModel, wuiCmdToTea(cmd), true
+		}
+		if msg := a.submitForm(target.Form); msg != nil {
+			newModel, cmd := a.model.Update(msg)
+			return newModel, wuiCmdToTea(cmd), true
 		}
 		return a.model, nil, true
 	}
@@ -149,10 +195,44 @@ func (a *teaAdapter) routeKeyToFocused(focusedID string, focusables []focusable,
 	return a.model, nil, true
 }
 
+// submitForm collects the form's current input values and produces the
+// form's OnSubmit Msg, or nil when there is no form or no handler.
+func (a *teaAdapter) submitForm(form *FormEl) Msg {
+	if form == nil || form.OnSubmit == nil {
+		return nil
+	}
+	return form.OnSubmit(a.renderer.formValues(*form))
+}
+
 func (a *teaAdapter) View() string {
 	a.focus.SetIDs(focusableIDs(collectFocusables(a.model.View())))
 	a.renderer.FocusedID = a.focus.FocusedID()
-	return a.renderer.Render(a.model.View())
+	view := a.renderer.Render(a.model.View())
+	if a.serveURL == "" {
+		return view
+	}
+	return a.withStatusBar(view)
+}
+
+// withStatusBar pins a one-line bar to the bottom of the screen
+// linking to the web rendering of the app. If the model implements
+// Pather, the link targets the equivalent path via the URL hash.
+func (a *teaAdapter) withStatusBar(view string) string {
+	url := a.serveURL
+	if p, ok := a.model.(Pather); ok {
+		if path := p.Path(); path != "" && path != "/" {
+			url += "#" + path
+		}
+	}
+	bar := lipgloss.NewStyle().
+		Reverse(true).
+		Width(a.renderer.Width).
+		Render(" web ⇒ " + url)
+	body := lipgloss.NewStyle().MaxHeight(a.renderer.Height - 1).Render(view)
+	if pad := a.renderer.Height - 1 - lipgloss.Height(body); pad > 0 {
+		body += strings.Repeat("\n", pad)
+	}
+	return body + "\n" + bar
 }
 
 func wuiCmdToTea(cmd Cmd) tea.Cmd {

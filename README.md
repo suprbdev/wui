@@ -5,6 +5,7 @@ A Go UI framework that renders the same component tree as a **terminal UI** (TUI
 ```
 make run-counter      # run counter example in terminal
 make serve-counter    # build + serve counter in browser at :8765
+make tui-counter      # run counter in terminal AND serve it in the browser
 ```
 
 ---
@@ -31,6 +32,8 @@ wui follows the [Elm Architecture](https://guide.elm-lang.org/architecture/): yo
 ```
 
 The HTML renderer maps every element to the correct semantic HTML tag — not canvas, not `<div>` soup. This means native browser behaviours work out of the box: tab focus, form submission, scroll, accessibility, link navigation.
+
+By default the WASM build also injects a small terminal-look stylesheet (monospace type, dark background, `[ Button ]` chrome, `- ` list markers, bordered tables) so the browser rendering visually matches the TUI. Disable it with `wui.WithoutBaseCSS()` if the host page brings its own styles.
 
 ### Element → HTML mapping
 
@@ -68,14 +71,14 @@ make build           # build wui package (TUI)
 make build-wasm      # build wui package (WASM)
 make vet             # go vet both TUI and WASM targets
 make test            # run tests
-make run-counter     # run counter example in terminal
-make run-form        # run form example in terminal
-make wasm-counter    # build counter → example/counter/web/
-make wasm-form       # build form    → example/form/web/
-make serve-counter   # build + serve counter at http://localhost:8765
-make serve-form      # build + serve form    at http://localhost:8765
+make run-NAME        # run example NAME in terminal
+make tui-NAME        # run example NAME in terminal + serve its web build on :8765
+make wasm-NAME       # build example NAME → example/NAME/web/
+make serve-NAME      # build + serve example NAME at http://localhost:8765
 make clean           # remove built WASM binaries
 ```
+
+`NAME` is any of the examples: `counter`, `form`, `todo`, `timer`. Override the port with `PORT=9000`.
 
 ---
 
@@ -166,6 +169,7 @@ wui also emits built-in messages your `Update` can handle:
 | `wui.InputMsg{ID, Value}` | Input value changed with no `OnChange` callback set |
 | `wui.SubmitMsg{FormValues}` | Form submitted with no `OnSubmit` callback set |
 | `wui.ClickMsg{TargetID}` | Link clicked |
+| `wui.NavigateMsg{Path}` | Browser URL hash names a path — initial load or back/forward (WASM only; see `wui.Pather`) |
 
 ### Cmd
 
@@ -265,11 +269,13 @@ wui.Input("password",
 )
 ```
 
-`OnChange` fires on every keystroke. `OnSubmit` fires on Enter (TUI) or Enter key in the input (HTML).
+`OnChange` fires on every keystroke. `OnSubmit` fires on Enter, on both platforms.
+
+Input values are **controlled with a twist**: in-progress typing is never clobbered by re-renders, but when your app changes `WithValue` programmatically (e.g. clearing a field after submit), the new value is applied. This works identically in TUI and HTML.
 
 ### Form
 
-Wraps inputs in a `<form>` (HTML) or a vertical container (TUI). The `OnSubmit` callback receives all input values by ID when the form is submitted — via the Submit button or Enter in the last field.
+Wraps inputs in a `<form>` (HTML) or a vertical container (TUI). The `OnSubmit` callback receives all input values by ID when the form is submitted.
 
 ```go
 wui.Form(
@@ -278,11 +284,13 @@ wui.Form(
     },
     wui.Input("user", wui.WithPlaceholder("Username")),
     wui.Input("pass", wui.WithPlaceholder("Password"), wui.WithPassword()),
-    wui.Button("Log in", func() wui.Msg { return nil }),
+    wui.Button("Log in", nil), // nil OnClick inside a Form = submit button
 )
 ```
 
-In TUI, form submission happens via the button's `OnClick`; `FormEl.OnSubmit` is used in HTML.
+Submission works the same on both platforms:
+- A button with `nil` OnClick inside a Form acts as a **submit button** — like `<button type="submit">` in HTML; in TUI, Enter on the focused button submits the form.
+- **Enter in an input** inside the form also submits it (unless the input has its own `OnSubmit`, which then takes precedence).
 
 ### List
 
@@ -348,10 +356,10 @@ type Style struct {
     Bold        bool
     Italic      bool
     Underline   bool
-    Padding     [4]int   // top, right, bottom, left
-    Margin      [4]int   // top, right, bottom, left
-    Width       int      // 0 = auto; terminal cells (TUI) or px (HTML)
-    Height      int      // 0 = auto; terminal cells (TUI) or px (HTML)
+    Padding     [4]int   // top, right, bottom, left — cells
+    Margin      [4]int   // top, right, bottom, left — cells
+    Width       int      // 0 = auto — cells
+    Height      int      // 0 = auto — cells
     Border      bool
     BorderColor Color
 }
@@ -362,7 +370,7 @@ type Style struct {
 - Named CSS colors (`"red"`, `"cornflowerblue"`) work on both platforms.
 - ANSI indices `"0"`–`"15"` are translated to hex for HTML, passed to lipgloss as-is for TUI.
 
-> **Note on Width/Height**: these are terminal cell columns/rows in TUI and pixels in HTML. Choose values that make sense for each context, or omit them (`0` = auto).
+**Units**: all sizing values (`Width`, `Height`, `Padding`, `Margin`, `Box` gap) are terminal cells. The HTML renderer translates them to the closest CSS analogues — `ch` horizontally and `lh` (line height, with an `em` fallback) vertically — so the same numbers produce visually similar layouts on both platforms.
 
 ---
 
@@ -372,10 +380,10 @@ type Style struct {
 |---|---|
 | `Tab` | Focus next focusable element |
 | `Shift+Tab` | Focus previous focusable element |
-| `Enter` | Activate focused button or link; submit focused input |
+| `Enter` | Activate focused button or link; submit focused input (its `OnSubmit`, else the enclosing form) |
 | `Ctrl+C` | Quit (intercepted by wui, not forwarded to `Update`) |
 
-Focusable elements in tree order: **TextInput → Button → Link**.
+Focusable elements are collected in tree order: text inputs, buttons, and links. Button focus keys derive from their labels, so give buttons in the same view unique labels.
 
 Your `Update` receives `wui.KeyMsg` for any key that isn't consumed by focus management or input editing. Use it for global shortcuts:
 
@@ -414,6 +422,56 @@ func (m model) Update(msg wui.Msg) (wui.Model, wui.Cmd) {
 ```
 
 Each `Cmd` runs in its own goroutine. The returned `Msg` is dispatched back through `Update` on the main loop.
+
+---
+
+## Running TUI and web together
+
+A TUI program can serve the WASM build of the same app over HTTP while it runs:
+
+```go
+wui.NewProgram(model{}, wui.WithWebServer(":8765", "example/counter/web")).Run()
+```
+
+The examples expose this as a `-serve` flag:
+
+```bash
+make tui-counter                      # builds the WASM bundle, then:
+go run ./example/counter -serve :8765
+```
+
+While serving, the TUI always shows a **status bar** pinned to the bottom of the screen with the URL of the equivalent web page:
+
+```
+ web ⇒ http://localhost:8765/
+```
+
+`WithWebServer` is a no-op in WASM builds, so shared `main` code can pass it unconditionally.
+
+### Equivalent paths (Pather)
+
+If your model implements `wui.Pather`, both platforms agree on *where* in the app you are:
+
+```go
+func (m model) Path() string {
+    if m.state == stateResult {
+        return "/result"
+    }
+    return "/"
+}
+```
+
+- **TUI**: the status bar link includes the path — `http://localhost:8765/#/result`.
+- **Browser**: `location.hash` is kept in sync with `Path()` after every update, and a `wui.NavigateMsg{Path}` is dispatched on initial load and on hash changes (back/forward), so deep links and history work:
+
+```go
+case wui.NavigateMsg:
+    if v.Path == "/result" && m.message != "" {
+        m.state = stateResult
+    } else {
+        m.state = stateForm
+    }
+```
 
 ---
 
@@ -499,29 +557,34 @@ This is efficient enough for typical app trees. VDOM diffing is a future enhance
 
 ## Examples
 
-### Counter (`example/counter/`)
-
-Minimal example: one button, one counter.
+Every example runs three ways:
 
 ```bash
-make run-counter      # terminal
-make serve-counter    # browser → http://localhost:8765
+make run-NAME     # terminal
+make serve-NAME   # browser → http://localhost:8765
+make tui-NAME     # terminal + web server + status bar link
 ```
+
+### Counter (`example/counter/`)
+
+Minimal example: increment/decrement/reset buttons, styled title, row layout.
 
 ### Contact form (`example/form/`)
 
-Two text inputs, validation, result view with a data table.
-
-```bash
-make run-form         # terminal
-make serve-form       # browser → http://localhost:8765
-```
+Two text inputs, validation, form submission via submit button or Enter, result view with a data table. Implements `wui.Pather` — the result screen lives at `#/result` in the browser and the TUI status bar links to it.
 
 TUI interaction:
 - `Tab` to cycle between Name input, Email input, Submit button
-- Type in each input field
-- `Enter` on Submit button to submit
+- `Enter` on the Submit button (or in an input) to submit
 - `q` or Back button to return to the form
+
+### Todo (`example/todo/`)
+
+Add items via input + submit button (or Enter), remove items with per-item buttons, scrollable list, programmatic input clearing after submit.
+
+### Timer (`example/timer/`)
+
+A stopwatch: Cmd-driven self-rescheduling ticks, start/stop/reset, bordered display.
 
 ---
 
@@ -541,9 +604,9 @@ The WASM binary includes none of the charmbracelet packages. The TUI binary incl
 ## Limitations (v1)
 
 - **No VDOM diffing** — HTML renderer does a full tree replace on each update. Works well for most apps; large frequently-updating trees may flicker.
-- **Width/Height units differ** — `Style.Width`/`Height` are terminal cells in TUI and pixels in HTML. Use `0` (auto) when building cross-platform.
 - **No mouse support in TUI** — buttons activate via Tab+Enter only; mouse clicks are not wired.
-- **No styled components** — style is applied per-element inline; there is no global stylesheet or theme system.
+- **Button focus keys derive from labels** — two buttons with the same label in one view share TUI focus; keep labels unique.
+- **No theme system** — style is applied per-element inline; the WASM base stylesheet (see `WithoutBaseCSS`) is the only global styling hook.
 - **ANSI color fidelity** — ANSI indices 0–15 map to fixed hex values in HTML; exact colours depend on the terminal's colour scheme in TUI.
 
 ---

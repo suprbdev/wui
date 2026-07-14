@@ -24,14 +24,22 @@ type tuiRenderer struct {
 	Width, Height int
 	FocusedID     string
 
-	inputs map[string]*textinput.Model
+	inputs map[string]*tuiInputState
+}
+
+// tuiInputState pairs a live bubbles text input with the spec Value it
+// was last synced from, so programmatic value changes by the app (e.g.
+// clearing a field after submit) can be told apart from user typing.
+type tuiInputState struct {
+	model    textinput.Model
+	lastSpec string
 }
 
 func newTUIRenderer(width, height int) *tuiRenderer {
 	return &tuiRenderer{
 		Width:  width,
 		Height: height,
-		inputs: make(map[string]*textinput.Model),
+		inputs: make(map[string]*tuiInputState),
 	}
 }
 
@@ -40,32 +48,80 @@ func (r *tuiRenderer) Render(el Element) string {
 }
 
 // focusable describes one element the Tab ring can land on. Inputs
-// are edited in place by routeKeyToInput; buttons and links activate
-// via their Activate closure when Enter is pressed.
+// are edited in place by routeKeyToFocused; buttons and links activate
+// via their Activate closure when Enter is pressed. Form points at the
+// nearest enclosing FormEl (nil outside forms) so that Enter can fall
+// back to submitting the form — a button with no OnClick inside a form
+// acts as a submit button, mirroring `<button type="submit">` in HTML.
 type focusable struct {
 	ID       string
 	IsInput  bool
-	Activate func() Msg // nil for inputs
+	Activate func() Msg // nil for inputs and submit buttons
+	Form     *FormEl
 }
 
 // collectFocusables walks the tree and returns focus-ring entries in
 // tree order: text inputs, buttons, and links.
 func collectFocusables(el Element) []focusable {
 	var out []focusable
-	var walk func(Element)
-	walk = func(e Element) {
+	var walk func(Element, *FormEl)
+	walk = func(e Element, form *FormEl) {
 		switch v := e.(type) {
 		case TextInputEl:
 			if v.ID != "" {
-				out = append(out, focusable{ID: v.ID, IsInput: true})
+				out = append(out, focusable{ID: v.ID, IsInput: true, Form: form})
 			}
 		case ButtonEl:
-			if !v.Disabled && v.OnClick != nil {
-				out = append(out, focusable{ID: buttonFocusKey(v), Activate: v.OnClick})
+			if v.Disabled {
+				return
+			}
+			if v.OnClick != nil {
+				out = append(out, focusable{ID: buttonFocusKey(v), Activate: v.OnClick, Form: form})
+			} else if form != nil && form.OnSubmit != nil {
+				out = append(out, focusable{ID: buttonFocusKey(v), Form: form})
 			}
 		case LinkEl:
 			id := "link:" + v.Href
 			out = append(out, focusable{ID: id, Activate: func() Msg { return ClickMsg{TargetID: v.Href} }})
+		case BoxEl:
+			for _, c := range v.Children {
+				walk(c, form)
+			}
+		case FormEl:
+			f := v
+			for _, c := range v.Children {
+				walk(c, &f)
+			}
+		case ListEl:
+			for _, c := range v.Items {
+				walk(c, form)
+			}
+		case ScrollAreaEl:
+			walk(v.Child, form)
+		}
+	}
+	walk(el, nil)
+	return out
+}
+
+// formValues collects the current value of every text input inside the
+// form, preferring the live bubbles model (in-progress typing) over
+// the spec value — the TUI analogue of reading <input> values on
+// form submission in the browser.
+func (r *tuiRenderer) formValues(form FormEl) map[string]string {
+	values := make(map[string]string)
+	var walk func(Element)
+	walk = func(e Element) {
+		switch v := e.(type) {
+		case TextInputEl:
+			if v.ID == "" {
+				return
+			}
+			if st, ok := r.inputs[v.ID]; ok {
+				values[v.ID] = st.model.Value()
+			} else {
+				values[v.ID] = v.Value
+			}
 		case BoxEl:
 			for _, c := range v.Children {
 				walk(c)
@@ -82,8 +138,10 @@ func collectFocusables(el Element) []focusable {
 			walk(v.Child)
 		}
 	}
-	walk(el)
-	return out
+	for _, c := range form.Children {
+		walk(c)
+	}
+	return values
 }
 
 func focusableIDs(items []focusable) []string {
@@ -124,10 +182,13 @@ func findInputByID(el Element, id string) *TextInputEl {
 	return nil
 }
 
-// ensureInput creates (if absent) and syncs placeholder/password mode
-// for the input with the given spec, returning the live bubbles model.
+// ensureInput creates (if absent) and syncs placeholder/value for the
+// input with the given spec, returning the live bubbles model. The
+// value is re-synced only when the spec value differs from the spec
+// value last seen — i.e. when the app changed it programmatically —
+// so in-progress typing is never clobbered by re-renders.
 func (r *tuiRenderer) ensureInput(spec TextInputEl) *textinput.Model {
-	in, ok := r.inputs[spec.ID]
+	st, ok := r.inputs[spec.ID]
 	if !ok {
 		m := textinput.New()
 		m.Placeholder = spec.Placeholder
@@ -135,18 +196,32 @@ func (r *tuiRenderer) ensureInput(spec TextInputEl) *textinput.Model {
 			m.EchoMode = textinput.EchoPassword
 		}
 		m.SetValue(spec.Value)
-		r.inputs[spec.ID] = &m
-		return &m
+		st = &tuiInputState{model: m, lastSpec: spec.Value}
+		r.inputs[spec.ID] = st
+		return &st.model
 	}
-	in.Placeholder = spec.Placeholder
-	return in
+	st.model.Placeholder = spec.Placeholder
+	if spec.Value != st.lastSpec {
+		// Avoid SetValue when the live value already matches (the
+		// common OnChange round-trip) — it would move the cursor to
+		// the end of the line mid-edit.
+		if spec.Value != st.model.Value() {
+			st.model.SetValue(spec.Value)
+		}
+		st.lastSpec = spec.Value
+	}
+	return &st.model
 }
 
 // setInput replaces the stored bubbles model for the given input ID.
 // textinput.Model.Update returns an updated value rather than mutating
 // in place, so callers must write the result back via this method.
 func (r *tuiRenderer) setInput(id string, m textinput.Model) {
-	r.inputs[id] = &m
+	if st, ok := r.inputs[id]; ok {
+		st.model = m
+		return
+	}
+	r.inputs[id] = &tuiInputState{model: m}
 }
 
 func (r *tuiRenderer) renderEl(el Element) string {
@@ -199,11 +274,25 @@ func (r *tuiRenderer) renderBox(e BoxEl) string {
 	}
 	var out string
 	if e.Direction == Row {
-		out = lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+		out = lipgloss.JoinHorizontal(alignToPosition(e.Align), parts...)
 	} else {
-		out = lipgloss.JoinVertical(lipgloss.Left, parts...)
+		out = lipgloss.JoinVertical(alignToPosition(e.Align), parts...)
 	}
 	return styleToLipgloss(e.Style).Render(out)
+}
+
+// alignToPosition maps Align onto a lipgloss join position: the
+// cross-axis placement of children (top/left for AlignStart, etc.).
+// AlignStretch has no terminal equivalent and behaves as AlignStart.
+func alignToPosition(a Align) lipgloss.Position {
+	switch a {
+	case AlignCenter:
+		return lipgloss.Center
+	case AlignEnd:
+		return lipgloss.Bottom // == lipgloss.Right (both 1.0)
+	default:
+		return lipgloss.Top // == lipgloss.Left (both 0.0)
+	}
 }
 
 func (r *tuiRenderer) renderButton(e ButtonEl) string {
@@ -217,10 +306,9 @@ func (r *tuiRenderer) renderButton(e ButtonEl) string {
 	return style.Render(label)
 }
 
-// buttonFocusKey derives a focus key from the button label. Buttons
-// are not part of the Tab-cycled input focus ring in v1; this key only
-// supports manual highlight wiring by callers that track button focus
-// separately.
+// buttonFocusKey derives the Tab-ring focus key for a button from its
+// label. Buttons with identical labels in one view share a key and
+// will highlight together — give buttons unique labels.
 func buttonFocusKey(e ButtonEl) string {
 	return "btn:" + e.Label
 }

@@ -33,6 +33,14 @@ type SubmitMsg struct {
 	FormValues map[string]string
 }
 
+// NavigateMsg is sent in WASM builds when the browser URL hash names a
+// path — on initial load with a "#/path" fragment and on every
+// hashchange (back/forward navigation). TUI programs never receive it.
+// See Pather.
+type NavigateMsg struct {
+	Path string
+}
+
 // ResizeMsg is sent when the terminal or window is resized.
 type ResizeMsg struct {
 	Width  int
