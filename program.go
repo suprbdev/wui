@@ -21,21 +21,30 @@ type Pather interface {
 }
 
 type config struct {
-	serveAddr string
-	webDir    string
-	noBaseCSS bool
+	serveEnabled bool
+	serveAddr    string
+	webDir       string
+	noBaseCSS    bool
 }
 
 // Option configures a Program at construction time.
 type Option func(*config)
 
 // WithWebServer serves dir — a WASM build of the same app (index.html,
-// main.wasm, wasm_exec.js) — over HTTP at addr (e.g. ":8765") for as
-// long as the TUI runs, and displays a status bar at the bottom of the
-// TUI linking to the equivalent web page. It has no effect in WASM
-// builds, so it is safe to pass unconditionally from shared code.
+// main.wasm, wasm_exec.js) — over HTTP for as long as the TUI runs,
+// and displays a status bar at the bottom of the TUI linking to the
+// equivalent web page.
+//
+// addr is the listen address, e.g. ":8765" (all interfaces) or
+// "127.0.0.1:8765". Pass "" to bind the loopback interface only, on
+// the first free port in 8765–8864 (falling back to an OS-assigned
+// port if the whole range is busy).
+//
+// It has no effect in WASM builds, so it is safe to pass
+// unconditionally from shared code.
 func WithWebServer(addr, dir string) Option {
 	return func(c *config) {
+		c.serveEnabled = true
 		c.serveAddr = addr
 		c.webDir = dir
 	}

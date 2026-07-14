@@ -3,7 +3,7 @@
 EXAMPLES := counter form todo timer
 GOROOT   := $(shell go env GOROOT)
 WASM_EXEC := $(GOROOT)/lib/wasm/wasm_exec.js
-PORT     ?= 8765
+PORT     ?=
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_%-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -27,20 +27,15 @@ run-%: ## Run an example in the terminal (e.g. make run-counter)
 	go run ./example/$*
 
 tui-%: wasm-% ## Run an example in the terminal + serve its web build (e.g. make tui-counter)
-	go run ./example/$* -serve :$(PORT)
+	go run ./example/$* -serve
 
 wasm-%: ## Build an example as WASM into example/NAME/web/ (e.g. make wasm-counter)
 	mkdir -p example/$*/web
 	GOOS=js GOARCH=wasm go build -o example/$*/web/main.wasm ./example/$*
 	cp $(WASM_EXEC) example/$*/web/wasm_exec.js
 
-serve-%: wasm-% ## Build and serve an example web build on :8765 (e.g. make serve-counter)
-	@echo "Serving $* at http://localhost:$(PORT)"
-	@python3 -c "\
-import http.server, mimetypes, os, sys; \
-mimetypes.add_type('application/wasm', '.wasm'); \
-os.chdir('example/$*/web'); \
-http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=$(PORT))"
+serve-%: wasm-% ## Build and serve an example web build; auto-picks a free port (override: PORT=8765)
+	@python3 scripts/serve.py example/$*/web $(PORT)
 
 clean: ## Remove built WASM binaries and web assets
 	rm -f example/*/web/main.wasm example/*/web/wasm_exec.js

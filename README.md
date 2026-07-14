@@ -4,7 +4,7 @@ A Go UI framework that renders the same component tree as a **terminal UI** (TUI
 
 ```
 make run-counter      # run counter example in terminal
-make serve-counter    # build + serve counter in browser at :8765
+make serve-counter    # build + serve counter in browser (auto-picks a free port)
 make tui-counter      # run counter in terminal AND serve it in the browser
 ```
 
@@ -72,13 +72,13 @@ make build-wasm      # build wui package (WASM)
 make vet             # go vet both TUI and WASM targets
 make test            # run tests
 make run-NAME        # run example NAME in terminal
-make tui-NAME        # run example NAME in terminal + serve its web build on :8765
+make tui-NAME        # run example NAME in terminal + serve its web build (auto port)
 make wasm-NAME       # build example NAME → example/NAME/web/
-make serve-NAME      # build + serve example NAME at http://localhost:8765
+make serve-NAME      # build + serve example NAME in the browser (auto port)
 make clean           # remove built WASM binaries
 ```
 
-`NAME` is any of the examples: `counter`, `form`, `todo`, `timer`. Override the port with `PORT=9000`.
+`NAME` is any of the examples: `counter`, `form`, `todo`, `timer`. Both serving targets auto-pick the first free port in 8765–8864 (loopback only); pin one with `make serve-counter PORT=9000` (binds all interfaces).
 
 ---
 
@@ -122,7 +122,7 @@ func main() {
 
 **TUI** — `make run-counter`
 
-**Browser** — `make serve-counter` then open `http://localhost:8765`
+**Browser** — `make serve-counter`, then open the printed URL
 
 Renders as:
 ```html
@@ -431,13 +431,29 @@ A TUI program can serve the WASM build of the same app over HTTP while it runs:
 
 ```go
 wui.NewProgram(model{}, wui.WithWebServer(":8765", "example/counter/web")).Run()
+
+// Or pass "" to pick a port automatically: binds loopback only, on the
+// first free port in 8765-8864 (OS-assigned as a last resort).
+wui.NewProgram(model{}, wui.WithWebServer("", "example/counter/web")).Run()
 ```
 
-The examples expose this as a `-serve` flag:
+The examples expose this as a `-serve` flag via the `wui.ServeFlag` helper:
 
 ```bash
-make tui-counter                      # builds the WASM bundle, then:
-go run ./example/counter -serve :8765
+make tui-counter                        # builds the WASM bundle, then:
+go run ./example/counter -serve         # auto-pick a free port (loopback only)
+go run ./example/counter -serve=:8765   # explicit address
+```
+
+Note the `=` in the explicit form — because bare `-serve` is allowed, the flag package treats it as boolean-style, so `-serve :8765` would not parse. In your own main:
+
+```go
+serve := wui.ServeFlag("serve", "also serve the web build")
+flag.Parse()
+var opts []wui.Option
+if serve.Enabled {
+    opts = append(opts, wui.WithWebServer(serve.Addr, "path/to/web"))
+}
 ```
 
 While serving, the TUI always shows a **status bar** pinned to the bottom of the screen with the URL of the equivalent web page:
@@ -480,7 +496,7 @@ case wui.NavigateMsg:
 ### Quick start
 
 ```bash
-make serve-counter   # builds WASM + copies wasm_exec.js + serves at :8765
+make serve-counter   # builds WASM + copies wasm_exec.js + serves on a free port
 make serve-form
 ```
 
@@ -561,7 +577,7 @@ Every example runs three ways:
 
 ```bash
 make run-NAME     # terminal
-make serve-NAME   # browser → http://localhost:8765
+make serve-NAME   # browser, auto-picked free port (printed on start)
 make tui-NAME     # terminal + web server + status bar link
 ```
 

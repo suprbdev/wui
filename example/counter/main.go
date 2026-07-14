@@ -42,12 +42,12 @@ func (m model) View() wui.Element {
 }
 
 func main() {
-	serve := flag.String("serve", "", "also serve the web build at this address (e.g. :8765)")
+	serve := wui.ServeFlag("serve", "also serve the web build; picks a free port, or bind explicitly with -serve=:8765")
 	flag.Parse()
 
 	var opts []wui.Option
-	if *serve != "" {
-		opts = append(opts, wui.WithWebServer(*serve, "example/counter/web"))
+	if serve.Enabled {
+		opts = append(opts, wui.WithWebServer(serve.Addr, "example/counter/web"))
 	}
 	if err := wui.NewProgram(model{}, opts...).Run(); err != nil {
 		panic(err)
