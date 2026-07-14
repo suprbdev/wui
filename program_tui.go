@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 type platformState struct {
@@ -18,17 +19,19 @@ type platformState struct {
 }
 
 func newProgram(m Model, cfg config) *Program {
+	zones := zone.New()
 	adapter := &teaAdapter{
 		model:    m,
-		renderer: newTUIRenderer(80, 24),
+		renderer: newTUIRenderer(80, 24, zones),
 		focus:    newTUIFocusManager(),
+		zones:    zones,
 	}
 	return &Program{
 		model: m,
 		cfg:   cfg,
 		platformState: platformState{
 			adapter:    adapter,
-			teaProgram: tea.NewProgram(adapter, tea.WithAltScreen()),
+			teaProgram: tea.NewProgram(adapter, tea.WithAltScreen(), tea.WithMouseCellMotion()),
 		},
 	}
 }
@@ -90,6 +93,7 @@ type teaAdapter struct {
 	model    Model
 	renderer *tuiRenderer
 	focus    *tuiFocusManager
+	zones    *zone.Manager
 	serveURL string // non-empty when WithWebServer is active
 }
 
@@ -108,6 +112,9 @@ func (a *teaAdapter) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return a.handleKey(m)
+
+	case tea.MouseMsg:
+		return a.handleMouse(m)
 
 	default:
 		// Anything else (including app-defined Msg values returned
@@ -152,6 +159,46 @@ func (a *teaAdapter) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	newModel, cmd := a.model.Update(KeyMsg{Key: key, Rune: firstRune(key)})
 	a.model = newModel
 	return a, wuiCmdToTea(cmd)
+}
+
+// handleMouse activates the clickable element (button, link, input)
+// under the mouse cursor on left-button release. Clicking any
+// focusable also moves keyboard focus to it, so a click followed by
+// typing behaves like the browser. Zones are recorded during View by
+// the bubblezone Scan pass, so hit-testing uses the previous frame's
+// layout — correct, since that is the frame the user clicked on.
+func (a *teaAdapter) handleMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.Action != tea.MouseActionRelease || m.Button != tea.MouseButtonLeft {
+		return a, nil
+	}
+
+	focusables := collectFocusables(a.model.View())
+	for _, f := range focusables {
+		z := a.zones.Get(f.ID)
+		if z == nil || z.IsZero() || !z.InBounds(m) {
+			continue
+		}
+
+		a.focus.SetIDs(focusableIDs(focusables))
+		a.focus.Focus(f.ID)
+		a.renderer.FocusedID = f.ID
+
+		if f.IsInput {
+			return a, nil
+		}
+		if f.Activate != nil {
+			newModel, cmd := a.model.Update(f.Activate())
+			a.model = newModel
+			return a, wuiCmdToTea(cmd)
+		}
+		if msg := a.submitForm(f.Form); msg != nil {
+			newModel, cmd := a.model.Update(msg)
+			a.model = newModel
+			return a, wuiCmdToTea(cmd)
+		}
+		return a, nil
+	}
+	return a, nil
 }
 
 // routeKeyToFocused dispatches a key event to whichever element holds
@@ -233,10 +280,13 @@ func (a *teaAdapter) View() string {
 	a.focus.SetIDs(focusableIDs(collectFocusables(a.model.View())))
 	a.renderer.FocusedID = a.focus.FocusedID()
 	view := a.renderer.Render(a.model.View())
-	if a.serveURL == "" {
-		return view
+	if a.serveURL != "" {
+		view = a.withStatusBar(view)
 	}
-	return a.withStatusBar(view)
+	// Scan strips the zero-width zone markers and records each zone's
+	// on-screen rectangle for mouse hit-testing. It must run on the
+	// final composed frame so coordinates match what the user sees.
+	return a.zones.Scan(view)
 }
 
 // withStatusBar pins a one-line bar to the bottom of the screen

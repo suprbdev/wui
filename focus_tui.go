@@ -42,6 +42,17 @@ func (m *tuiFocusManager) Prev() {
 	}
 }
 
+// Focus moves the cursor to the given ID, if present in the ring.
+// Unknown IDs leave focus unchanged.
+func (m *tuiFocusManager) Focus(id string) {
+	for i, v := range m.ids {
+		if v == id {
+			m.cursor = i
+			return
+		}
+	}
+}
+
 func (m *tuiFocusManager) FocusedID() string {
 	if len(m.ids) == 0 || m.cursor < 0 {
 		return ""

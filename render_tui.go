@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 	ltable "github.com/charmbracelet/lipgloss/table"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 // ansiPalette maps ANSI color indices 0-15 to lipgloss colors.
@@ -25,6 +26,7 @@ type tuiRenderer struct {
 	FocusedID     string
 
 	inputs map[string]*tuiInputState
+	zones  *zone.Manager
 }
 
 // tuiInputState pairs a live bubbles text input with the spec Value it
@@ -35,11 +37,12 @@ type tuiInputState struct {
 	lastSpec string
 }
 
-func newTUIRenderer(width, height int) *tuiRenderer {
+func newTUIRenderer(width, height int, zones *zone.Manager) *tuiRenderer {
 	return &tuiRenderer{
 		Width:  width,
 		Height: height,
 		inputs: make(map[string]*tuiInputState),
+		zones:  zones,
 	}
 }
 
@@ -300,10 +303,12 @@ func (r *tuiRenderer) renderButton(e ButtonEl) string {
 	style := styleToLipgloss(e.Style)
 	if e.Disabled {
 		style = style.Faint(true)
-	} else if r.FocusedID == buttonFocusKey(e) {
+		return style.Render(label)
+	}
+	if r.FocusedID == buttonFocusKey(e) {
 		style = style.Reverse(true)
 	}
-	return style.Render(label)
+	return r.zones.Mark(buttonFocusKey(e), style.Render(label))
 }
 
 // buttonFocusKey derives the Tab-ring focus key for a button from its
@@ -322,7 +327,11 @@ func (r *tuiRenderer) renderTextInput(e TextInputEl) string {
 		in.Blur()
 	}
 	style := styleToLipgloss(e.Style)
-	return style.Render(in.View())
+	out := style.Render(in.View())
+	if e.ID != "" {
+		out = r.zones.Mark(e.ID, out)
+	}
+	return out
 }
 
 func (r *tuiRenderer) renderForm(e FormEl) string {
@@ -361,7 +370,7 @@ func (r *tuiRenderer) renderLink(e LinkEl) string {
 	if r.FocusedID == "link:"+e.Href {
 		style = style.Reverse(true)
 	}
-	return style.Render(e.Label)
+	return r.zones.Mark("link:"+e.Href, style.Render(e.Label))
 }
 
 func (r *tuiRenderer) renderTable(e TableEl) string {
