@@ -83,9 +83,17 @@ func collectFocusables(el Element) []focusable {
 			} else if form != nil && form.OnSubmit != nil {
 				out = append(out, focusable{ID: buttonFocusKey(v), Form: form})
 			}
+		case CheckboxEl:
+			if v.Disabled {
+				return
+			}
+			cb := v
+			out = append(out, focusable{ID: cb.ID, Activate: func() Msg { return checkboxToggleMsg(cb, !cb.Checked) }, Form: form})
 		case LinkEl:
 			id := "link:" + v.Href
 			out = append(out, focusable{ID: id, Activate: func() Msg { return ClickMsg{TargetID: v.Href} }})
+		case CardEl:
+			walk(v.Child, form)
 		case BoxEl:
 			for _, c := range v.Children {
 				walk(c, form)
@@ -139,6 +147,8 @@ func (r *tuiRenderer) formValues(form FormEl) map[string]string {
 			}
 		case ScrollAreaEl:
 			walk(v.Child)
+		case CardEl:
+			walk(v.Child)
 		}
 	}
 	for _, c := range form.Children {
@@ -181,6 +191,8 @@ func findInputByID(el Element, id string) *TextInputEl {
 		}
 	case ScrollAreaEl:
 		return findInputByID(v.Child, id)
+	case CardEl:
+		return findInputByID(v.Child, id)
 	}
 	return nil
 }
@@ -194,6 +206,9 @@ func (r *tuiRenderer) ensureInput(spec TextInputEl) *textinput.Model {
 	st, ok := r.inputs[spec.ID]
 	if !ok {
 		m := textinput.New()
+		// No "> " prompt: the HTML renderer draws a bare <input>, so a
+		// TUI-only prompt would make the two platforms diverge.
+		m.Prompt = ""
 		m.Placeholder = spec.Placeholder
 		if spec.Password {
 			m.EchoMode = textinput.EchoPassword
@@ -237,6 +252,10 @@ func (r *tuiRenderer) renderEl(el Element) string {
 		return r.renderButton(e)
 	case TextInputEl:
 		return r.renderTextInput(e)
+	case CheckboxEl:
+		return r.renderCheckbox(e)
+	case CardEl:
+		return r.renderCard(e)
 	case FormEl:
 		return r.renderForm(e)
 	case ListEl:
@@ -311,13 +330,6 @@ func (r *tuiRenderer) renderButton(e ButtonEl) string {
 	return r.zones.Mark(buttonFocusKey(e), style.Render(label))
 }
 
-// buttonFocusKey derives the Tab-ring focus key for a button from its
-// label. Buttons with identical labels in one view share a key and
-// will highlight together — give buttons unique labels.
-func buttonFocusKey(e ButtonEl) string {
-	return "btn:" + e.Label
-}
-
 func (r *tuiRenderer) renderTextInput(e TextInputEl) string {
 	in := r.ensureInput(e)
 	focused := r.FocusedID == e.ID
@@ -330,6 +342,80 @@ func (r *tuiRenderer) renderTextInput(e TextInputEl) string {
 	out := style.Render(in.View())
 	if e.ID != "" {
 		out = r.zones.Mark(e.ID, out)
+	}
+	return out
+}
+
+func (r *tuiRenderer) renderCheckbox(e CheckboxEl) string {
+	mark := "[ ]"
+	if e.Checked {
+		mark = "[x]"
+	}
+	label := mark
+	if e.Label != "" {
+		label += " " + e.Label
+	}
+	style := styleToLipgloss(e.Style)
+	if e.Disabled {
+		return style.Faint(true).Render(label)
+	}
+	if r.FocusedID == e.ID {
+		style = style.Reverse(true)
+	}
+	return r.zones.Mark(e.ID, style.Render(label))
+}
+
+// renderCard draws the child inside a rounded border with the title
+// embedded in the top border line:
+//
+//	╭ Title ────╮
+//	│ content   │
+//	╰───────────╯
+//
+// The border is drawn by hand (lipgloss borders cannot host a title).
+// From e.Style: Padding and Width shape the interior, Margin wraps the
+// finished box, BorderColor colors the frame. Title text is bold.
+func (r *tuiRenderer) renderCard(e CardEl) string {
+	inner := r.renderEl(e.Child)
+	innerStyle := lipgloss.NewStyle().
+		Padding(e.Style.Padding[0], e.Style.Padding[1], e.Style.Padding[2], e.Style.Padding[3])
+	if e.Style.Width > 2 {
+		innerStyle = innerStyle.Width(e.Style.Width - 2)
+	}
+	inner = innerStyle.Render(inner)
+
+	title := ""
+	if e.Title != "" {
+		title = lipgloss.NewStyle().Bold(true).Render(" " + e.Title + " ")
+	}
+	tw := lipgloss.Width(title)
+	w := lipgloss.Width(inner)
+	if w < tw+2 {
+		w = tw + 2
+	}
+	// Pad every line to the box width so the right border aligns.
+	inner = lipgloss.NewStyle().Width(w).Render(inner)
+
+	bs := lipgloss.NewStyle()
+	if e.Style.BorderColor != "" {
+		bs = bs.Foreground(lipgloss.Color(resolveColor(e.Style.BorderColor)))
+	}
+	b := lipgloss.RoundedBorder()
+
+	var sb strings.Builder
+	sb.WriteString(bs.Render(b.TopLeft + b.Top))
+	sb.WriteString(title)
+	sb.WriteString(bs.Render(strings.Repeat(b.Top, w-tw-1) + b.TopRight))
+	for _, line := range strings.Split(inner, "\n") {
+		sb.WriteString("\n" + bs.Render(b.Left) + line + bs.Render(b.Right))
+	}
+	sb.WriteString("\n" + bs.Render(b.BottomLeft+strings.Repeat(b.Bottom, w)+b.BottomRight))
+
+	out := sb.String()
+	if e.Style.Margin != [4]int{} {
+		out = lipgloss.NewStyle().
+			Margin(e.Style.Margin[0], e.Style.Margin[1], e.Style.Margin[2], e.Style.Margin[3]).
+			Render(out)
 	}
 	return out
 }

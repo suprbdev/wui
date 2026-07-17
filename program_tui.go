@@ -219,7 +219,9 @@ func (a *teaAdapter) routeKeyToFocused(focusedID string, focusables []focusable,
 	}
 
 	if !target.IsInput {
-		if m.String() == "enter" {
+		// Enter or Space activates, matching native browser buttons
+		// and checkboxes.
+		if key := m.String(); key == "enter" || key == " " || key == "space" {
 			if target.Activate != nil {
 				newModel, cmd := a.model.Update(target.Activate())
 				return newModel, wuiCmdToTea(cmd), true

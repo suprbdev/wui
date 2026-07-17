@@ -33,7 +33,7 @@ wui follows the [Elm Architecture](https://guide.elm-lang.org/architecture/): yo
 
 The HTML renderer maps every element to the correct semantic HTML tag — not canvas, not `<div>` soup. This means native browser behaviours work out of the box: tab focus, form submission, scroll, accessibility, link navigation.
 
-By default the WASM build also injects a small terminal-look stylesheet (monospace type, dark background, `[ Button ]` chrome, `- ` list markers, bordered tables) so the browser rendering visually matches the TUI. Disable it with `wui.WithoutBaseCSS()` if the host page brings its own styles.
+By default the WASM build also injects a small terminal-look stylesheet (monospace type, dark background, `[ Button ]` chrome, `[x]` checkboxes, `- ` list markers, bordered tables, preserved whitespace so column-aligned text lines up like in a terminal) so the browser rendering visually matches the TUI. Disable it with `wui.WithoutBaseCSS()` if the host page brings its own styles.
 
 ### Element → HTML mapping
 
@@ -44,6 +44,8 @@ By default the WASM build also injects a small terminal-look stylesheet (monospa
 | `Box(Column)` | `<div style="display:flex;flex-direction:column">` | — |
 | `Button` | `<button>` | focusable, keyboard-activatable |
 | `Input` | `<input type="text/password">` | native caret, IME, autofill |
+| `Checkbox` | `<label><input type="checkbox">` | focusable, Space toggles, label click |
+| `Card` | `<fieldset><legend>` | — |
 | `Form` | `<form>` | submit on Enter, `preventDefault` wired |
 | `List(false)` | `<ul><li>…</li></ul>` | — |
 | `List(true)` | `<ol><li>…</li></ul>` | — |
@@ -167,6 +169,7 @@ wui also emits built-in messages your `Update` can handle:
 | `wui.KeyMsg{Key, Rune}` | Key press in TUI (key names: `"enter"`, `"ctrl+c"`, `"tab"`, `"backspace"`, `"up"`, `"down"`, etc.) |
 | `wui.ResizeMsg{Width, Height}` | Terminal or window resize |
 | `wui.InputMsg{ID, Value}` | Input value changed with no `OnChange` callback set |
+| `wui.ToggleMsg{ID, Checked}` | Checkbox toggled with no `OnToggle` callback set |
 | `wui.SubmitMsg{FormValues}` | Form submitted with no `OnSubmit` callback set |
 | `wui.ClickMsg{TargetID}` | Link clicked |
 | `wui.NavigateMsg{Path}` | Browser URL hash names a path — initial load or back/forward (WASM only; see `wui.Pather`) |
@@ -241,10 +244,16 @@ wui.Button("Save", nil, wui.Disabled())
 
 // With style:
 wui.Button("Delete", onDelete, wui.WithButtonStyle(wui.Style{FG: "#ff0000"}))
+
+// With an explicit identity (needed when several buttons share a label,
+// e.g. a per-row "✕" delete button):
+wui.Button("✕", onDelete, wui.WithID("del-"+itemID))
 ```
 
-**TUI**: rendered as `[ Label ]`, focusable via Tab, activated via Enter.
+**TUI**: rendered as `[ Label ]`, focusable via Tab, activated via Enter or Space.
 **HTML**: `<button onclick=…>`.
+
+A button's focus identity is its `WithID` value when set, else its label. Buttons that share a label *and* have no ID share TUI focus and a DOM id — give repeated buttons IDs.
 
 ### Input
 
@@ -272,6 +281,46 @@ wui.Input("password",
 `OnChange` fires on every keystroke. `OnSubmit` fires on Enter, on both platforms.
 
 Input values are **controlled with a twist**: in-progress typing is never clobbered by re-renders, but when your app changes `WithValue` programmatically (e.g. clearing a field after submit), the new value is applied. This works identically in TUI and HTML.
+
+### Checkbox
+
+```go
+wui.Checkbox("done-42", "Buy milk", item.Done, func(checked bool) wui.Msg {
+    return toggleMsg{id: 42, done: checked}
+})
+
+// Without a callback, toggling emits wui.ToggleMsg{ID, Checked}:
+wui.Checkbox("opt-in", "Subscribe", m.optIn, nil)
+
+// Disabled:
+wui.Checkbox("locked", "Read-only", true, nil, wui.CheckboxDisabled())
+```
+
+**TUI**: rendered as `[x] Label` / `[ ] Label`, focusable via Tab, toggled via Enter or Space.
+**HTML**: a real `<label><input type="checkbox">` — Space toggles, clicking the label toggles, screen readers announce it. The base CSS hides the native box and draws the same `[x]` mark as the TUI.
+
+The `id` must be stable and unique per view (like `Input`).
+
+### Card
+
+A titled, bordered panel — the standard dashboard building block:
+
+```go
+wui.Card("Weather", body)
+
+// With style (Border is implied; Padding, Margin, Width, BorderColor apply):
+wui.Card("Weather", body, wui.WithCardStyle(wui.Style{Padding: [4]int{0, 1, 0, 1}}))
+```
+
+**TUI**: rounded border with the bold title embedded in the top border line:
+
+```
+╭ Weather ─────────╮
+│ 21.3°C  clear    │
+╰──────────────────╯
+```
+
+**HTML**: `<fieldset><legend>Weather</legend>…</fieldset>` — the semantic element for a titled group, styled by the base CSS to match.
 
 ### Form
 
@@ -316,11 +365,11 @@ Items can be any `Element`, not just text. Renders as `<ul>`/`<ol>` + `<li>` in 
 ```go
 wui.Scroll(
     wui.Box(wui.Column, items...),
-    20, // max height: terminal rows (TUI) or pixels (HTML)
+    20, // max height in terminal rows, both platforms
 )
 ```
 
-**TUI**: `lipgloss.MaxHeight`. **HTML**: `overflow:auto; max-height:Npx`.
+**TUI**: `lipgloss.MaxHeight`. **HTML**: `overflow:auto; max-height:Nlh` (an `em` fallback covers browsers without `lh`).
 
 ### Link
 
@@ -380,10 +429,12 @@ type Style struct {
 |---|---|
 | `Tab` | Focus next focusable element |
 | `Shift+Tab` | Focus previous focusable element |
-| `Enter` | Activate focused button or link; submit focused input (its `OnSubmit`, else the enclosing form) |
+| `Enter` / `Space` | Activate focused button, link, or checkbox; Enter submits a focused input (its `OnSubmit`, else the enclosing form) |
 | `Ctrl+C` | Quit (intercepted by wui, not forwarded to `Update`) |
 
-Focusable elements are collected in tree order: text inputs, buttons, and links. Button focus keys derive from their labels, so give buttons in the same view unique labels.
+Mouse clicks are also wired in the TUI: clicking a button, link, checkbox, or input activates it and moves keyboard focus to it, like the browser.
+
+Focusable elements are collected in tree order: text inputs, checkboxes, buttons, and links. Button focus keys derive from `WithID` when set, else from the label — give repeated buttons IDs.
 
 Your `Update` receives `wui.KeyMsg` for any key that isn't consumed by focus management or input editing. Use it for global shortcuts:
 
@@ -620,8 +671,7 @@ The WASM binary includes none of the charmbracelet packages. The TUI binary incl
 ## Limitations (v1)
 
 - **No VDOM diffing** — HTML renderer does a full tree replace on each update. Works well for most apps; large frequently-updating trees may flicker.
-- **No mouse support in TUI** — buttons activate via Tab+Enter only; mouse clicks are not wired.
-- **Button focus keys derive from labels** — two buttons with the same label in one view share TUI focus; keep labels unique.
+- **Button focus keys derive from labels by default** — two buttons with the same label and no `WithID` in one view share TUI focus; give repeated buttons IDs.
 - **No theme system** — style is applied per-element inline; the WASM base stylesheet (see `WithoutBaseCSS`) is the only global styling hook.
 - **ANSI color fidelity** — ANSI indices 0–15 map to fixed hex values in HTML; exact colours depend on the terminal's colour scheme in TUI.
 

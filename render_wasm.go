@@ -76,7 +76,7 @@ func (r *wasmRenderer) Render(el Element) {
 
 func (r *wasmRenderer) collectInputValues(doc js.Value) map[string]string {
 	values := make(map[string]string)
-	nodeList := r.root.Call("querySelectorAll", "input")
+	nodeList := r.root.Call("querySelectorAll", `input:not([type="checkbox"])`)
 	length := nodeList.Get("length").Int()
 	for i := 0; i < length; i++ {
 		n := nodeList.Call("item", i)
@@ -103,6 +103,10 @@ func (r *wasmRenderer) renderEl(el Element, doc js.Value) js.Value {
 		return r.renderButton(e, doc)
 	case TextInputEl:
 		return r.renderTextInput(e, doc)
+	case CheckboxEl:
+		return r.renderCheckbox(e, doc)
+	case CardEl:
+		return r.renderCard(e, doc)
 	case FormEl:
 		return r.renderForm(e, doc)
 	case ListEl:
@@ -150,6 +154,9 @@ func (r *wasmRenderer) renderBox(e BoxEl, doc js.Value) js.Value {
 func (r *wasmRenderer) renderButton(e ButtonEl, doc js.Value) js.Value {
 	n := doc.Call("createElement", "button")
 	n.Set("textContent", e.Label)
+	// The focus key doubles as the DOM id so keyboard focus survives
+	// the full-tree replace, mirroring the TUI focus ring.
+	n.Set("id", buttonFocusKey(e))
 	if e.Disabled {
 		n.Set("disabled", true)
 	}
@@ -217,6 +224,60 @@ func (r *wasmRenderer) renderTextInput(e TextInputEl, doc js.Value) js.Value {
 	return n
 }
 
+// renderCheckbox renders <label><input type="checkbox"><span/></label>.
+// The native checkbox is visually hidden (browsers cannot restyle it as
+// text) and a sibling span draws the TUI-style "[ ]"/"[x]" mark via the
+// base CSS; the input still provides focus, keyboard toggling, and the
+// change event.
+func (r *wasmRenderer) renderCheckbox(e CheckboxEl, doc js.Value) js.Value {
+	label := doc.Call("createElement", "label")
+	label.Set("className", "wui-checkbox")
+	applyStyle(label, e.Style)
+
+	input := doc.Call("createElement", "input")
+	input.Set("type", "checkbox")
+	input.Set("id", e.ID)
+	input.Set("checked", e.Checked)
+	if e.Disabled {
+		input.Set("disabled", true)
+	}
+	spec := e
+	changeFn := js.FuncOf(func(this js.Value, args []js.Value) any {
+		checked := args[0].Get("target").Get("checked").Bool()
+		r.dispatch(checkboxToggleMsg(spec, checked))
+		return nil
+	})
+	r.addFunc(changeFn)
+	input.Call("addEventListener", "change", changeFn)
+	label.Call("appendChild", input)
+
+	mark := doc.Call("createElement", "span")
+	mark.Set("className", "wui-checkbox-mark")
+	label.Call("appendChild", mark)
+
+	if e.Label != "" {
+		text := doc.Call("createElement", "span")
+		text.Set("textContent", " "+e.Label)
+		label.Call("appendChild", text)
+	}
+	return label
+}
+
+// renderCard renders <fieldset><legend>Title</legend>…</fieldset> — the
+// semantic HTML for a titled, bordered panel; the base CSS styles it to
+// match the TUI's title-in-border card.
+func (r *wasmRenderer) renderCard(e CardEl, doc js.Value) js.Value {
+	n := doc.Call("createElement", "fieldset")
+	applyStyle(n, e.Style)
+	if e.Title != "" {
+		legend := doc.Call("createElement", "legend")
+		legend.Set("textContent", e.Title)
+		n.Call("appendChild", legend)
+	}
+	n.Call("appendChild", r.renderEl(e.Child, doc))
+	return n
+}
+
 func (r *wasmRenderer) renderForm(e FormEl, doc js.Value) js.Value {
 	n := doc.Call("createElement", "form")
 	applyStyle(n, e.Style)
@@ -238,9 +299,12 @@ func (r *wasmRenderer) renderForm(e FormEl, doc js.Value) js.Value {
 	return n
 }
 
+// collectFormValues gathers text-input values by id. Checkboxes are
+// excluded — the TUI's formValues only walks text inputs, and checkbox
+// state flows through OnToggle/ToggleMsg instead.
 func collectFormValues(formNode js.Value) map[string]string {
 	values := make(map[string]string)
-	nodeList := formNode.Call("querySelectorAll", "input")
+	nodeList := formNode.Call("querySelectorAll", `input:not([type="checkbox"])`)
 	length := nodeList.Get("length").Int()
 	for i := 0; i < length; i++ {
 		input := nodeList.Call("item", i)
@@ -271,7 +335,9 @@ func (r *wasmRenderer) renderScroll(e ScrollAreaEl, doc js.Value) js.Value {
 	n := doc.Call("createElement", "div")
 	css := "overflow:auto;"
 	if e.MaxHeight > 0 {
-		css += fmt.Sprintf("max-height:%dpx;", e.MaxHeight)
+		// MaxHeight is terminal rows, like every other vertical unit:
+		// lh is the CSS analogue, with an em fallback.
+		css += fmt.Sprintf("max-height:%dem;max-height:%dlh;", e.MaxHeight, e.MaxHeight)
 	}
 	n.Set("style", css+styleToCSS(e.Style))
 	n.Call("appendChild", r.renderEl(e.Child, doc))
@@ -282,6 +348,8 @@ func (r *wasmRenderer) renderLink(e LinkEl, doc js.Value) js.Value {
 	n := doc.Call("createElement", "a")
 	n.Set("textContent", e.Label)
 	n.Set("href", e.Href)
+	// Same id scheme as the TUI focus ring; keeps focus across renders.
+	n.Set("id", "link:"+e.Href)
 	applyStyle(n, e.Style)
 	return n
 }
@@ -379,8 +447,9 @@ func resolveCSSColor(c Color) string {
 	return string(c)
 }
 
-// alignItemsCSS maps Align to a CSS align-items value. AlignStart
-// returns "" since flex-start is the default.
+// alignItemsCSS maps Align to a CSS align-items value. AlignStart must
+// be emitted explicitly: the CSS default is stretch, but the TUI joins
+// children at their natural size, so flex-start is the parity default.
 func alignItemsCSS(a Align) string {
 	switch a {
 	case AlignCenter:
@@ -390,7 +459,7 @@ func alignItemsCSS(a Align) string {
 	case AlignStretch:
 		return "stretch"
 	default:
-		return ""
+		return "flex-start"
 	}
 }
 
@@ -410,7 +479,9 @@ body {
   font-size: 14px;
   line-height: 1.4;
 }
-#wui-root { padding: 1em 1ch; }
+/* pre-wrap: runs of spaces are significant in a terminal (column
+   alignment via %-Ns etc.) and must survive in HTML too. */
+#wui-root { padding: 1em 1ch; white-space: pre-wrap; }
 #wui-root button {
   font: inherit;
   color: inherit;
@@ -429,7 +500,7 @@ body {
   outline: none;
 }
 #wui-root button:disabled { opacity: 0.45; cursor: default; }
-#wui-root input {
+#wui-root input:not([type="checkbox"]) {
   font: inherit;
   color: inherit;
   background: #1f2128;
@@ -438,6 +509,31 @@ body {
   padding: 0 1ch;
 }
 #wui-root input:focus { outline: none; border-color: #7aa2f7; }
+#wui-root label.wui-checkbox { cursor: pointer; width: fit-content; }
+#wui-root label.wui-checkbox input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+#wui-root .wui-checkbox-mark::before { content: "[ ]"; }
+#wui-root input:checked + .wui-checkbox-mark::before { content: "[x]"; }
+#wui-root input:focus-visible + .wui-checkbox-mark {
+  background: #e6e6e6;
+  color: #14151a;
+}
+#wui-root input:disabled + .wui-checkbox-mark { opacity: 0.45; }
+#wui-root input:disabled ~ span { opacity: 0.45; }
+#wui-root fieldset {
+  border: 1px solid #3a3d46;
+  border-radius: 6px;
+  margin: 0;
+  padding: 0.25lh 1ch;
+  min-width: 0;
+  width: fit-content;
+}
+#wui-root legend { font-weight: bold; padding: 0 1ch; }
 #wui-root a { color: inherit; }
 #wui-root a:focus-visible {
   background: #e6e6e6;

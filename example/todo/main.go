@@ -44,10 +44,10 @@ func (m model) Update(msg wui.Msg) (wui.Model, wui.Cmd) {
 func (m model) View() wui.Element {
 	rows := make([]wui.Element, len(m.items))
 	for i, item := range m.items {
-		// Button labels double as TUI focus keys, so each label
-		// includes the item number to stay unique.
+		// WithID keeps repeated "✕" buttons distinct in the focus ring.
 		rows[i] = wui.BoxStyled(wui.Row, 1, wui.Style{},
-			wui.Button(fmt.Sprintf("✕ %d", i+1), func() wui.Msg { return removeMsg{index: i} }),
+			wui.Button("✕", func() wui.Msg { return removeMsg{index: i} },
+				wui.WithID(fmt.Sprintf("remove-%d", i))),
 			wui.Text(item),
 		)
 	}

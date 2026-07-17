@@ -20,6 +20,13 @@ type ClickMsg struct {
 	TargetID string
 }
 
+// ToggleMsg is sent when a Checkbox is toggled and it has no OnToggle
+// callback of its own. Checked is the new state.
+type ToggleMsg struct {
+	ID      string
+	Checked bool
+}
+
 // InputMsg is sent when a TextInput's value changes and it has no
 // OnChange callback of its own.
 type InputMsg struct {
