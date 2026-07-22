@@ -56,3 +56,14 @@ type ResizeMsg struct {
 
 // NoneMsg is a no-op message.
 type NoneMsg struct{}
+
+// firstRune returns the first rune of a normalized key name — the
+// printable character for single-rune keys, or the first letter of a
+// named key ("enter" → 'e'); callers should treat Rune as meaningful
+// only for single-rune keys.
+func firstRune(key string) rune {
+	for _, r := range key {
+		return r
+	}
+	return 0
+}

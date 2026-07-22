@@ -166,7 +166,7 @@ wui also emits built-in messages your `Update` can handle:
 
 | Type | When |
 |---|---|
-| `wui.KeyMsg{Key, Rune}` | Key press in TUI (key names: `"enter"`, `"ctrl+c"`, `"tab"`, `"backspace"`, `"up"`, `"down"`, etc.) |
+| `wui.KeyMsg{Key, Rune}` | Key press on both platforms (key names: `"enter"`, `"ctrl+c"`, `"tab"`, `"backspace"`, `"up"`, `"down"`, etc.). In the browser, keys aimed at a focused input/textarea/select stay with that element and are not dispatched |
 | `wui.ResizeMsg{Width, Height}` | Terminal or window resize |
 | `wui.InputMsg{ID, Value}` | Input value changed with no `OnChange` callback set |
 | `wui.ToggleMsg{ID, Checked}` | Checkbox toggled with no `OnToggle` callback set |
@@ -436,7 +436,7 @@ Mouse clicks are also wired in the TUI: clicking a button, link, checkbox, or in
 
 Focusable elements are collected in tree order: text inputs, checkboxes, buttons, and links. Button focus keys derive from `WithID` when set, else from the label — give repeated buttons IDs.
 
-Your `Update` receives `wui.KeyMsg` for any key that isn't consumed by focus management or input editing. Use it for global shortcuts:
+Your `Update` receives `wui.KeyMsg` for any key that isn't consumed by focus management or input editing — in the TUI and in the browser alike (WASM builds listen on `document` and skip keys aimed at an editable element; alt/meta chords and unmapped named keys stay with the browser, and space, backspace, `'`, `/`, and tab have their page defaults suppressed so they behave like the TUI). Use it for global shortcuts:
 
 ```go
 case wui.KeyMsg:

@@ -320,10 +320,3 @@ func wuiCmdToTea(cmd Cmd) tea.Cmd {
 		return cmd()
 	}
 }
-
-func firstRune(key string) rune {
-	for _, r := range key {
-		return r
-	}
-	return 0
-}

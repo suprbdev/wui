@@ -56,8 +56,103 @@ func (p *Program) run() error {
 	})
 	js.Global().Call("addEventListener", "hashchange", hashFn)
 
+	// Global key events, mirroring the TUI: keys not aimed at an
+	// editable element reach the app as KeyMsg. Editable elements keep
+	// their own listeners (input/keydown wired by the renderer), so
+	// typing in an Input never double-dispatches.
+	keyFn := js.FuncOf(func(this js.Value, args []js.Value) any {
+		event := args[0]
+		if activeElementIsEditable(doc) {
+			return nil
+		}
+		key, ok := normalizeKeyEvent(event)
+		if !ok {
+			return nil
+		}
+		if shouldPreventDefault(key) {
+			event.Call("preventDefault")
+		}
+		p.dispatch(KeyMsg{Key: key, Rune: firstRune(key)})
+		return nil
+	})
+	doc.Call("addEventListener", "keydown", keyFn)
+
 	<-p.platformState.done
 	return nil
+}
+
+// activeElementIsEditable reports whether keyboard input is currently
+// aimed at a text-editing or otherwise key-consuming element.
+func activeElementIsEditable(doc js.Value) bool {
+	active := doc.Get("activeElement")
+	if active.IsNull() || active.IsUndefined() {
+		return false
+	}
+	switch active.Get("tagName").String() {
+	case "INPUT", "TEXTAREA", "SELECT":
+		return true
+	}
+	return active.Get("isContentEditable").Truthy()
+}
+
+// jsKeyNames maps browser KeyboardEvent.key values to the normalized
+// names the TUI produces (bubbletea key names).
+var jsKeyNames = map[string]string{
+	"Backspace":  "backspace",
+	"Enter":      "enter",
+	"Escape":     "esc",
+	"Tab":        "tab",
+	"ArrowUp":    "up",
+	"ArrowDown":  "down",
+	"ArrowLeft":  "left",
+	"ArrowRight": "right",
+	"Home":       "home",
+	"End":        "end",
+	"PageUp":     "pgup",
+	"PageDown":   "pgdown",
+	"Delete":     "delete",
+}
+
+// normalizeKeyEvent translates a browser keydown event into the TUI's
+// normalized key name. ok is false for events that should not reach the
+// app: bare modifier presses, alt/meta chords (browser and OS
+// shortcuts), and named keys wui does not model.
+func normalizeKeyEvent(event js.Value) (key string, ok bool) {
+	k := event.Get("key").String()
+	switch k {
+	case "Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock":
+		return "", false
+	}
+	if event.Get("altKey").Bool() || event.Get("metaKey").Bool() {
+		return "", false
+	}
+
+	if name, found := jsKeyNames[k]; found {
+		k = name
+	} else if len([]rune(k)) != 1 {
+		// Unmapped named key (F5, Insert, media keys, …).
+		return "", false
+	}
+
+	if event.Get("ctrlKey").Bool() {
+		return "ctrl+" + k, true
+	}
+	return k, true
+}
+
+// shouldPreventDefault reports whether a dispatched key must have its
+// browser default suppressed: keys whose defaults would disrupt the app
+// when no editable element has focus — space scrolls, backspace
+// navigates history, "'" and "/" open Firefox quick-find, tab moves
+// focus out of step with the app's own handling, and ctrl+backspace
+// navigates in some browsers. Other ctrl chords keep their browser
+// behaviour.
+func shouldPreventDefault(key string) bool {
+	switch key {
+	case " ", "backspace", "'", "/", "tab", "ctrl+backspace":
+		return true
+	}
+	return false
 }
 
 func currentHashPath() string {
