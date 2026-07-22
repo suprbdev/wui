@@ -35,7 +35,7 @@ wasm-%: ## Build an example as WASM into example/NAME/web/ (e.g. make wasm-count
 	cp $(WASM_EXEC) example/$*/web/wasm_exec.js
 
 serve-%: wasm-% ## Build and serve an example web build; auto-picks a free port (override: PORT=8765)
-	@python3 scripts/serve.py example/$*/web $(PORT)
+	@go run ./cmd/serve example/$*/web $(PORT)
 
 clean: ## Remove built WASM binaries and web assets
 	rm -f example/*/web/main.wasm example/*/web/wasm_exec.js

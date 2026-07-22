@@ -4,13 +4,14 @@ package wui
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
+
+	"github.com/suprbdev/wui/webserver"
 )
 
 type platformState struct {
@@ -38,54 +39,16 @@ func newProgram(m Model, cfg config) *Program {
 
 func (p *Program) run() error {
 	if p.cfg.serveEnabled {
-		ln, err := listenWeb(p.cfg.serveAddr)
+		ln, err := webserver.Listen(p.cfg.serveAddr)
 		if err != nil {
 			return fmt.Errorf("wui: web server: %w", err)
 		}
 		defer ln.Close()
 		go http.Serve(ln, http.FileServer(http.Dir(p.cfg.webDir)))
-		p.adapter.serveURL = serveURL(ln.Addr())
+		p.adapter.serveURL = webserver.URL(ln.Addr())
 	}
 	_, err := p.teaProgram.Run()
 	return err
-}
-
-// Port range scanned when WithWebServer gets an empty address: an
-// unprivileged, developer-conventional block starting at wui's
-// default port.
-const (
-	autoPortMin = 8765
-	autoPortMax = 8864
-)
-
-// listenWeb binds the given address, or — when addr is empty — picks a
-// port automatically: loopback only, first free port in
-// [autoPortMin, autoPortMax], falling back to an OS-assigned ephemeral
-// port when the whole range is busy.
-func listenWeb(addr string) (net.Listener, error) {
-	if addr != "" {
-		return net.Listen("tcp", addr)
-	}
-	for port := autoPortMin; port <= autoPortMax; port++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
-		if err == nil {
-			return ln, nil
-		}
-	}
-	return net.Listen("tcp", "localhost:0")
-}
-
-// serveURL derives a browser-openable URL from the bound listener
-// address, mapping wildcard and loopback hosts to "localhost".
-func serveURL(addr net.Addr) string {
-	host, port, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return "http://" + addr.String() + "/"
-	}
-	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
-		host = "localhost"
-	}
-	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
 // teaAdapter bridges a wui.Model into a tea.Model.
